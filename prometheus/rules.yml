@@ -1,0 +1,100 @@
+groups:
+- name: Web
+  rules:
+   - alert: http_200_ok
+     expr: probe_success == 0
+     for: 5m
+     labels:
+       severity: error
+     annotations:
+       identifier: '{{ $labels.instance }}'
+       description: "endpoint down"
+
+- name: Elastic rules
+  rules:
+  - alert: cluster_unstable
+    expr: elasticsearch_cluster_health_number_of_nodes < 3
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      identifier: '{{ $labels.instance }}'
+      description: There are only {{ $value }} < 3 ES nodes running
+
+  - alert: elastic_heap_size
+    expr: elasticsearch_jvm_memory_used_bytes{ area="heap" } / elasticsearch_jvm_memory_max_bytes{ area="heap" } > 0.9
+    for: 15m
+    labels:
+      severity: critical
+    annotations:
+      identifier: '{{ $labels.instance }}'
+      description: ElasticSearch node {{$labels.node}} heap usage is high
+
+
+- name: Swarm node rules
+  rules:
+  - alert: node_cpu_usage
+    expr: 100 - (avg(irate(node_cpu_seconds_total{mode="idle"}[1m]) * ON(instance) GROUP_LEFT(node_name)
+      node_meta * 100) BY (node_name)) > 70
+    for: 60m
+    labels:
+      severity: info
+    annotations:
+      identifier: '{{ $labels.instance }}'
+      description: Swarm node {{ $labels.node_name }} CPU usage is at {{ humanize $value}}%.
+  - alert: node_memory_usage
+    expr: sum(((node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes)
+      * ON(instance) GROUP_LEFT(node_name) node_meta * 100) BY (node_name) > 90
+    for: 20m
+    labels:
+      severity: warning
+    annotations:
+      identifier: '{{ $labels.instance }}'
+      description: Swarm node {{ $labels.node_name }} memory usage is at {{ humanize $value}}%.
+  - alert: node_disk_usage
+    expr: ((node_filesystem_size_bytes{mountpoint="/rootfs"} - node_filesystem_free_bytes{mountpoint="/rootfs"})
+      * 100 / node_filesystem_size_bytes{mountpoint="/rootfs"}) * ON(instance) GROUP_LEFT(node_name)
+      node_meta > 90
+    for: 1m
+    labels:
+      severity: warning
+    annotations:
+      identifier: '{{ $labels.instance }}'
+      description: Swarm node {{ $labels.node_name }} disk usage is at {{ humanize
+        $value}}%.
+  - alert: node_disk_fill_rate_6h
+    expr: predict_linear(node_filesystem_free_bytes{mountpoint="/rootfs"}[1h], 6 * 3600) * ON(instance)
+      GROUP_LEFT(node_name) node_meta < 0
+    for: 1h
+    labels:
+      severity: critical
+    annotations:
+      identifier: '{{ $labels.instance }}'
+      description: Swarm node {{ $labels.node_name }} disk is going to fill up in 6h.
+
+- name: Swarm task rules
+  rules:
+  - alert: task_high_cpu_usage_90
+    expr: sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_swarm_task_name=~".+"}[1m]))
+      BY (container_label_com_docker_swarm_task_name)
+      * 100 > 90
+    for: 1m
+    annotations:
+      identifier: '{{ $labels.instance }}'
+      description: '{{ $labels.container_label_com_docker_swarm_task_name }} CPU usage is at {{ humanize $value}}%.'
+
+- name: Postgres
+  rules:
+  - alert: connection_close_to_limit_500
+    expr: sum(pg_connections_connections{datname!~"template.*"}) > 400
+    for: 1m
+    annotations:
+      identifier: '{{ $labels.instance }}'
+      description: CloudSQL instance is reaching connection limit
+
+  - alert: individual_connections_limit_50
+    expr: pg_connections_connections{datname!~"template.*"} > 50
+    for: 1m
+    annotations:
+      identifier: '{{ $labels.instance }}'
+      description: Database *{{ $labels.datname }}* uses *{{ $value }}* instance connections

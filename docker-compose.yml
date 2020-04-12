@@ -1,0 +1,268 @@
+version: "3.7"
+
+services:
+  elasticsearch_exporter:
+    image: justwatch/elasticsearch_exporter:latest
+    command:
+      - '--es.uri=https://YOUR-ES-URL'
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.monitoring == true
+
+  postgres-exporter:
+    image: wrouesnel/postgres_exporter:latest
+    configs:
+      - source: postgres_queries
+        target: /opt/queries.yaml
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.monitoring == true
+    environment:
+      - DATA_SOURCE_NAME=postgresql://YOUR-USER:YOUR-PASSWORD@YOUR-HOST:YOUR-PORT/postgres?sslmode=disable
+#      - PG_EXPORTER_AUTO_DISCOVER_DATABASES=true
+#      - PG_EXPORTER_EXCLUDE_DATABASES=cloudsqladmin
+#      - PG_EXPORTER_DISABLE_DEFAULT_METRICS=true
+#      - PG_EXPORTER_DISABLE_SETTINGS_METRICS=true
+      - PG_EXPORTER_EXTEND_QUERY_PATH=/opt/queries.yaml
+
+  dockerd-exporter:
+    image: stefanprodan/caddy
+    environment:
+      - DOCKER_GWBRIDGE_IP=172.18.0.1
+    configs:
+      - source: dockerd_config
+        target: /etc/caddy/Caddyfile
+    deploy:
+      mode: global
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+
+  cadvisor:
+    image: google/cadvisor:latest
+    command: 
+      - '--logtostderr=true'
+      - '--docker_only=true'
+      - '--port=2080'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /:/rootfs:ro
+      - /var/run:/var/run
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports:
+      - "2080:2080"
+    deploy:
+      mode: global
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${ADMIN_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
+      - GF_SERVER_ROOT_URL=/grafana
+      #- GF_SERVER_DOMAIN=monitoring.example.com
+      #- GF_SERVER_ROOT_URL=%(protocol)s://%(domain)s:/grafana
+      #- GF_SERVER_ROOT_URL=monitoring.example.com/grafana
+      #- GF_SMTP_ENABLED=${GF_SMTP_ENABLED:-false}
+      #- GF_SMTP_FROM_ADDRESS=${GF_SMTP_FROM_ADDRESS:-grafana@test.com}
+      #- GF_SMTP_FROM_NAME=${GF_SMTP_FROM_NAME:-Grafana}
+      #- GF_SMTP_HOST=${GF_SMTP_HOST:-smtp:25}
+      #- GF_SMTP_USER=${GF_SMTP_USER}
+      #- GF_SMTP_PASSWORD=${GF_SMTP_PASSWORD}
+    volumes:
+      - grafana:/var/lib/grafana
+      - ./grafana/datasources/:/etc/grafana/provisioning/datasources/
+      - ./grafana/dashboards/:/etc/grafana/dashboards/
+    configs:
+      - source: grafana_config
+        target: /etc/grafana/provisioning/dashboards/swarmprom_dashboards.yml
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    volumes:
+      - alertmanager:/alertmanager
+    configs:
+      - source: alertmanager_config
+        target: /etc/alertmanager/alertmanager.yml
+      - source: alertmanager_template
+        target: /etc/alertmanager/notifications.tmpl
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.monitoring == true
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+
+  unsee:
+    image: cloudflare/unsee:latest
+    environment:
+      - ALERTMANAGER_URI=http://alertmanager:9093
+      - PORT=5000
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.monitoring == true
+
+  node-exporter:
+    image: stefanprodan/swarmprom-node-exporter:v0.16.0
+    environment:
+      - NODE_ID={{.Node.ID}}
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+      - /etc/hostname:/etc/nodename
+    command:
+      - '--path.sysfs=/host/sys'
+      - '--path.procfs=/host/proc'
+      - '--collector.textfile.directory=/etc/node-exporter/'
+      - '--collector.filesystem.ignored-mount-points=^/(sys|proc|dev|host|etc)($$|/)'
+      - '--no-collector.ipvs'
+    deploy:
+      mode: global
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention=24h'
+    volumes:
+      - prometheus:/prometheus
+    configs:
+      - source: prometheus_config
+        target: /etc/prometheus/prometheus.yml
+      - source: prometheus_rules
+        target: /etc/prometheus/rules.yml
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          memory: 2048M
+        reservations:
+          memory: 128M
+
+  caddy:
+    image: stefanprodan/caddy
+    ports:
+      - "9090:9090"
+      - "9093:9093"
+      - "9094:9094"
+    environment:
+      - ADMIN_USER=${ADMIN_USER}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+    configs:
+      - source: caddy_config
+        target: /etc/caddy/Caddyfile
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.monitoring == true
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 5s
+      timeout: 1s
+      retries: 5
+
+  blackbox:
+    image: bitnami/blackbox-exporter:latest
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.monitoring == true
+  
+  redis_exporter:
+    image: oliver006/redis_exporter
+    environment:
+        - REDIS_PASSWORD=YOUR-REDIS-PASSWORD
+        - REDIS_ADDR=YOUR-REDIS-ADDR
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.monitoring == true
+
+volumes:
+    grafana:
+    alertmanager:
+    prometheus:
+
+configs:
+  alertmanager_config:
+    file: ./alertmanager/alertmanager.yml
+  alertmanager_template:
+    file: ./alertmanager/notifications.tmpl
+  postgres_queries:
+    name: ${TIMESTAMP}-postgres_queries
+    file: ./postgres-exporter/queries.yaml
+  grafana_config:
+    name: ${TIMESTAMP}-grafana_config
+    file: ./grafana/swarmprom_dashboards.yml
+  caddy_config:
+    file: ./caddy/Caddyfile
+  dockerd_config:
+    file: ./dockerd-exporter/Caddyfile
+  prometheus_config:
+    name: ${TIMESTAMP}-prometheus_config
+    file: ./prometheus/prometheus.yml
+  prometheus_rules:
+    name: ${TIMESTAMP}-prometheus_rules
+    file: ./prometheus/rules.yml
